@@ -239,30 +239,38 @@ def read_key_file(mount_point: Path) -> Optional[Dict[str, Any]]:
 
 
 def write_key_file(mount_point: Path, payload: Dict[str, Any]) -> Path:
-    """Write the .floppy-key token file and sync filesystem to physical media."""
+    """Write the .floppy-key token file atomically and sync filesystem to physical media."""
     key_path = mount_point / KEY_FILE_NAME
-
-    # Remove existing key file if present to prevent permission conflict on overwrite
-    if key_path.exists():
-        try:
-            key_path.unlink()
-        except Exception as e:
-            logger.debug("Could not unlink existing key file: %s", e)
+    tmp_path = mount_point / f"{KEY_FILE_NAME}.tmp"
 
     try:
-        with open(key_path, "w", encoding="utf-8") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
             f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+
+        tmp_path.replace(key_path)
+        os.sync()
+        return key_path
     except PermissionError as e:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
         raise PermissionError(
             f"Cannot write key to floppy disk: {e}.\n"
             "Please check if the physical write-protect tab on the back of the 3.5\" floppy disk is open (locked) "
             "or if the disk is mounted read-only."
         ) from e
-
-    # Flush all buffers to magnetic media
-    os.sync()
-    return key_path
+    except Exception as e:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+        raise
 
 
 VOLUME_ANCHOR_FILE = ".floppy-uuid"

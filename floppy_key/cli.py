@@ -91,8 +91,9 @@ def cmd_pair(args) -> int:
 
     print("\n" + "=" * 55)
     print(" Pairing Complete! Floppy is now your physical key.")
-    print(f"    Key ID : {host_payload['key_id']}")
-    print(f"    User   : {username}")
+    print(f"    Key ID  : {host_payload['key_id']}")
+    print(f"    User    : {username}")
+    print(f"    Counter : #{host_payload.get('counter', 1)} (Dynamic Rolling)")
     print("=" * 55 + "\n")
     return 0
 
@@ -199,7 +200,9 @@ def cmd_daemon(args) -> int:
                             lockout.record_failure()
                             unlocked_for_current_insertion = True
                         else:
-                            mount_point = hardware.ensure_mounted(dev)
+                            mount_point = hardware.ensure_mounted(dev, require_writable=True)
+                            if not mount_point:
+                                mount_point = hardware.ensure_mounted(dev, require_writable=False)
                             if not mount_point:
                                 logger.warning("Failed to access mounted floppy disk.")
                                 lockout.record_failure()
@@ -214,13 +217,67 @@ def cmd_daemon(args) -> int:
                                     token = key_data.get("token")
                                     key_id = key_data.get("key_id")
                                     volume_id = hardware.get_disk_volume_id(dev, mount_point)
-                                    if crypto.verify_token(token, key_id, host_cfg, volume_id):
+                                    verify_status, err_detail = crypto.verify_token_state(
+                                        token=token,
+                                        key_id=key_id,
+                                        host_config=host_cfg,
+                                        volume_id=volume_id,
+                                    )
+
+                                    if verify_status in (crypto.TokenVerifyStatus.VALID, crypto.TokenVerifyStatus.PENDING_COMMIT):
                                         lockout.record_success()
                                         logger.info("Key verified! Unlocking desktop session...")
                                         session.unlock_desktop()
                                         unlocked_for_current_insertion = True
+
+                                        # If it was an interrupted pending commit, finalize host config
+                                        if verify_status == crypto.TokenVerifyStatus.PENDING_COMMIT:
+                                            host_cfg = crypto.commit_roll(host_cfg)
+                                            config.save_config(host_cfg)
+                                            logger.info(
+                                                "Finalized pending transaction from previous session (counter: #%d)",
+                                                host_cfg.get("counter", 1),
+                                            )
+
+                                        # Roll dynamic token for next unlock
+                                        try:
+                                            next_payload, staged_cfg = crypto.prepare_next_token(host_cfg, volume_id)
+                                            # Staging: save pending state to host config first
+                                            config.save_config(staged_cfg)
+                                            # Atomic write to physical floppy disk
+                                            hardware.write_key_file(mount_point, next_payload)
+                                            # Commit: promote staged token and retire previous
+                                            host_cfg = crypto.commit_roll(staged_cfg)
+                                            config.save_config(host_cfg)
+                                            logger.info(
+                                                "Successfully rolled dynamic token (counter: #%d)",
+                                                host_cfg.get("counter", 1),
+                                            )
+                                        except PermissionError as e:
+                                            logger.warning(
+                                                "Floppy is physically write-protected (read-only); token rolling deferred."
+                                            )
+                                            host_cfg.pop("pending", None)
+                                            config.save_config(host_cfg)
+                                        except Exception as e:
+                                            logger.warning("Could not roll dynamic token to disk: %s", e)
+                                            host_cfg.pop("pending", None)
+                                            config.save_config(host_cfg)
+
+                                    elif verify_status == crypto.TokenVerifyStatus.CLONE_DETECTED:
+                                        logger.critical(
+                                            "SECURITY ALERT: Floppy presented a retired token! Possible cloned disk or replay attack. Detail: %s",
+                                            err_detail,
+                                        )
+                                        security.send_security_alert(
+                                            "FloppyKey Security Alert",
+                                            f"CRITICAL: Cloned disk or replay attack blocked! ({err_detail})",
+                                        )
+                                        lockout.record_failure()
+                                        unlocked_for_current_insertion = True
+
                                     else:
-                                        logger.warning("Floppy key verification failed (token, key_id, or volume mismatch).")
+                                        logger.warning("Floppy key verification failed: %s", err_detail)
                                         lockout.record_failure()
                                         unlocked_for_current_insertion = True
 
@@ -277,6 +334,10 @@ def cmd_status(args) -> int:
         print(f"  Config Path : {config.get_config_path()}")
         print(f"  Key ID      : {cfg.get('key_id')}")
         print(f"  User        : {cfg.get('user')}")
+        print(f"  Counter     : #{cfg.get('counter', 1)} (Dynamic Rolling)")
+        retired_count = len(cfg.get("retired", []))
+        if retired_count > 0:
+            print(f"  Retired Keys: {retired_count} historical tokens tracked")
         print(f"  Paired At   : {cfg.get('paired_at')}")
     else:
         print("  Status      : [-] NOT PAIRED (run 'floppy-key pair' to create key)")
@@ -292,11 +353,21 @@ def cmd_status(args) -> int:
                 print(f"  Disk User   : {key_data.get('user')}")
                 if cfg:
                     volume_id = hardware.get_disk_volume_id(dev, mp)
-                    match = crypto.verify_token(key_data.get("token"), key_data.get("key_id"), cfg, volume_id)
-                    if match:
-                        print("  Match Result: [OK] VALID & MATCHES HOST CONFIG")
+                    status, detail = crypto.verify_token_state(
+                        token=key_data.get("token"),
+                        key_id=key_data.get("key_id"),
+                        host_config=cfg,
+                        volume_id=volume_id,
+                    )
+                    disk_counter = key_data.get("counter", 1)
+                    if status == crypto.TokenVerifyStatus.VALID:
+                        print(f"  Match Result: [OK] VALID (Counter #{disk_counter})")
+                    elif status == crypto.TokenVerifyStatus.PENDING_COMMIT:
+                        print(f"  Match Result: [OK] VALID (Pending commit #{disk_counter})")
+                    elif status == crypto.TokenVerifyStatus.CLONE_DETECTED:
+                        print(f"  Match Result: [!] CRITICAL: CLONED DISK / RETIRED TOKEN DETECTED ({detail})")
                     else:
-                        print("  Match Result: [FAIL] MISMATCH (Token does not match host)")
+                        print(f"  Match Result: [FAIL] MISMATCH ({detail})")
                 else:
                     print("  Match Result: [-] Cannot verify (host not paired)")
             else:
