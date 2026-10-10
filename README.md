@@ -34,6 +34,7 @@ floppy-key pair
 floppy-key status   # 查看硬件、介质与服务状态
 floppy-key pair     # 制作钥匙软盘
 floppy-key unlock   # 手动测试解锁
+floppy-key reset    # 重置失败计数与会话锁定
 floppy-key revoke   # 作废当前钥匙绑定
 floppy-key daemon   # 前台运行守护进程
 ```

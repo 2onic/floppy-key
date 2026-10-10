@@ -6,6 +6,7 @@ Provides subcommands:
   status  - Diagnose hardware, media, pairing, and session states
   unlock  - Test desktop screen wake-up and unlock directly
   revoke  - Invalidate and remove host and disk pairing credentials
+  reset   - Reset session failed attempt count and lockout state
 """
 
 import argparse
@@ -302,6 +303,16 @@ def cmd_revoke(args) -> int:
     return 0
 
 
+def cmd_reset(args) -> int:
+    """Reset session failure count and lockout state."""
+    if lockout.is_locked_out() or lockout.get_failed_count() > 0:
+        lockout.reset_lockout()
+        print("[+] Session lockout and failed attempts reset successfully.")
+    else:
+        print("[-] No active lockout or failed attempts to reset.")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="floppy-key",
@@ -337,6 +348,10 @@ def main():
     p_revoke = subparsers.add_parser("revoke", help="Revoke current pairing credentials")
     p_revoke.add_argument("-w", "--wipe-disk", action="store_true", help="Also wipe key file on floppy disk")
     p_revoke.set_defaults(func=cmd_revoke)
+
+    # reset
+    p_reset = subparsers.add_parser("reset", help="Reset failed attempts and session lockout")
+    p_reset.set_defaults(func=cmd_reset)
 
     args = parser.parse_args()
     if not args.command:
