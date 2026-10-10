@@ -214,7 +214,7 @@ def acquire_daemon_lock():
     lock_dir = lockout.get_runtime_dir()
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_file = lock_dir / "daemon.lock"
-    f = open(lock_file, "w")
+    f = open(lock_file, "a")
     try:
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return f
@@ -592,6 +592,7 @@ def cmd_unlock(args) -> int:
 def cmd_revoke(args) -> int:
     """Revoke pairing credentials on host and optionally wipe the floppy key."""
     print("[*] Revoking FloppyKey pairing...")
+    wipe_failed = False
     with config.locked():
         removed_host = config.revoke_config()
         if removed_host:
@@ -604,15 +605,29 @@ def cmd_revoke(args) -> int:
             if dev and hardware.is_disk_present(dev):
                 mp = hardware.ensure_mounted(dev, require_writable=True)
                 if mp:
-                    wiped = hardware.wipe_key_file(mp)
-                    if wiped:
-                        print("[+] Key file securely wiped from floppy disk.")
-                    else:
-                        print("[-] No key file found on floppy to wipe.")
+                    try:
+                        wiped = hardware.wipe_key_file(mp)
+                        if wiped:
+                            print("[+] Key file securely wiped from floppy disk.")
+                        else:
+                            print("[-] No key file found on floppy to wipe.")
+                    except hardware.WriteProtectedError as e:
+                        print(f"[!] Error: Floppy disk is write-protected (tab locked). Cannot wipe key file: {e}")
+                        wipe_failed = True
+                    except OSError as e:
+                        print(f"[!] Error wiping key file from floppy disk: {e}")
+                        wipe_failed = True
+                else:
+                    print("[!] Error: Could not mount floppy disk to wipe key file.")
+                    wipe_failed = True
             else:
                 print("[-] No floppy disk present to wipe.")
+                wipe_failed = True
 
         lockout.reset_lockout()
+    if wipe_failed:
+        print("[!] Revocation partially complete (floppy wipe failed).")
+        return 1
     print("[+] Revocation complete.")
     return 0
 

@@ -391,25 +391,29 @@ def _overwrite_and_unlink(path: Path) -> bool:
         path.unlink()
         os.sync()
         return True
-    except Exception as e:
+    except OSError as e:
+        if e.errno in _WRITE_PROTECT_ERRNOS:
+            raise WriteProtectedError(
+                f"Cannot wipe {path.name}: disk is write-protected or mounted read-only."
+            ) from e
         logger.warning("Failed to wipe %s: %s", path, e)
-        return False
+        raise
 
 
 def wipe_key_file(mount_point: Path) -> bool:
-    """Overwrite and remove key files (and the legacy volume anchor) from the disk."""
+    """Overwrite and remove key files (and the legacy volume anchor) from the disk.
+
+    Returns:
+        True: at least one key file was found and wiped.
+        False: no key file was found on the disk.
+
+    Raises:
+        WriteProtectedError: disk is write-protected or mounted read-only.
+        OSError: file wipe failed due to I/O error.
+    """
     wiped = False
-    for name in (KEY_FILE_NAME, KEY_TMP_FILE_NAME):
+    for name in (KEY_FILE_NAME, KEY_TMP_FILE_NAME, LEGACY_VOLUME_ANCHOR_FILE):
         if _overwrite_and_unlink(mount_point / name):
             wiped = True
-
-    anchor_path = mount_point / LEGACY_VOLUME_ANCHOR_FILE
-    if anchor_path.is_file():
-        try:
-            anchor_path.unlink()
-            os.sync()
-            wiped = True
-        except Exception:
-            pass
 
     return wiped

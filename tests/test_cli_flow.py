@@ -263,6 +263,58 @@ class TestCliFlow(unittest.TestCase):
         # unmount_device called to restore original unmounted state
         mock_unmount.assert_called_with(self.mock_dev)
 
+    def test_acquire_daemon_lock_no_truncation(self):
+        lock_file = lockout.get_runtime_dir() / "daemon.lock"
+        lockout.get_runtime_dir().mkdir(parents=True, exist_ok=True)
+        lock_file.write_text("existing_content", encoding="utf-8")
+
+        h1 = cli.acquire_daemon_lock()
+        self.assertIsNotNone(h1)
+        # Verify file was not truncated by open(..., "a")
+        self.assertEqual(lock_file.read_text(encoding="utf-8"), "existing_content")
+
+        # Second acquisition should fail
+        h2 = cli.acquire_daemon_lock()
+        self.assertIsNone(h2)
+
+        h1.close()
+
+        # Re-acquisition succeeds
+        h3 = cli.acquire_daemon_lock()
+        self.assertIsNotNone(h3)
+        h3.close()
+
+    @patch("floppy_key.hardware.find_floppy_device")
+    @patch("floppy_key.hardware.is_disk_present")
+    @patch("floppy_key.hardware.ensure_mounted")
+    def test_cmd_revoke_wipe_disk_scenarios(self, mock_ensure, mock_present, mock_find):
+        mock_find.return_value = self.mock_dev
+        mock_ensure.return_value = self.mount_point
+
+        # 1. Successful wipe
+        mock_present.return_value = True
+        floppy, host = crypto.generate_key_pair("testuser")
+        config.save_config(host)
+        hardware.write_key_file(self.mount_point, floppy)
+
+        args = MagicMock(wipe_disk=True)
+        ret = cli.cmd_revoke(args)
+        self.assertEqual(ret, 0)
+        self.assertIsNone(config.load_config())
+        self.assertFalse((self.mount_point / hardware.KEY_FILE_NAME).exists())
+
+        # 2. Write-protected wipe returns 1 and reports error
+        config.save_config(host)
+        hardware.write_key_file(self.mount_point, floppy)
+        with patch("floppy_key.hardware.wipe_key_file", side_effect=hardware.WriteProtectedError("Disk is write protected")):
+            ret = cli.cmd_revoke(args)
+            self.assertEqual(ret, 1)
+
+        # 3. No disk present with wipe_disk returns 1
+        mock_present.return_value = False
+        ret = cli.cmd_revoke(args)
+        self.assertEqual(ret, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

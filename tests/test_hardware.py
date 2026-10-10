@@ -72,6 +72,22 @@ class TestHardware(unittest.TestCase):
             self.assertFalse((mp / hardware.KEY_TMP_FILE_NAME).exists())
             self.assertFalse(anchor.exists())
 
+    def test_wipe_key_file_empty(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            mp = Path(tmp_dir)
+            self.assertFalse(hardware.wipe_key_file(mp))
+
+    def test_wipe_key_file_write_protected_raises(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            mp = Path(tmp_dir)
+            payload = {"version": 2, "key_id": "k123", "token": "tok456"}
+            hardware.write_key_file(mp, payload)
+
+            import errno
+            with patch("builtins.open", side_effect=OSError(errno.EROFS, "Read-only file system")):
+                with self.assertRaises(hardware.WriteProtectedError):
+                    hardware.wipe_key_file(mp)
+
     @patch("floppy_key.hardware.is_disk_present")
     @patch("floppy_key.hardware.get_current_mount_point")
     @patch("floppy_key.hardware._udisks_unmount")
