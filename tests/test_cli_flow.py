@@ -237,6 +237,32 @@ class TestCliFlow(unittest.TestCase):
         self.assertEqual(current_cfg["counter"], 1)
         self.assertIsNone(current_cfg.get("pending"))
 
+    @patch("floppy_key.hardware.find_floppy_device")
+    @patch("floppy_key.hardware.is_disk_present")
+    @patch("floppy_key.hardware.get_current_mount_point")
+    @patch("floppy_key.hardware.ensure_mounted")
+    @patch("floppy_key.hardware.unmount_device")
+    def test_cmd_status_cleans_up_mount_if_not_previously_mounted(
+        self, mock_unmount, mock_ensure, mock_get_mp, mock_present, mock_find
+    ):
+        mock_find.return_value = self.mock_dev
+        mock_present.return_value = True
+        mock_get_mp.return_value = None  # Not mounted initially
+        mock_ensure.return_value = self.mount_point
+
+        floppy, host = crypto.generate_key_pair("testuser")
+        config.save_config(host)
+        hardware.write_key_file(self.mount_point, floppy)
+
+        args = MagicMock()
+        ret = cli.cmd_status(args)
+        self.assertEqual(ret, 0)
+
+        # ensure_mounted called with read_only=True
+        mock_ensure.assert_called_with(self.mock_dev, read_only=True)
+        # unmount_device called to restore original unmounted state
+        mock_unmount.assert_called_with(self.mock_dev)
+
 
 if __name__ == "__main__":
     unittest.main()

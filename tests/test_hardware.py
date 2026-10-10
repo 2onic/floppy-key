@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+
 from floppy_key import hardware
 
 
@@ -69,6 +71,23 @@ class TestHardware(unittest.TestCase):
             self.assertFalse((mp / hardware.KEY_FILE_NAME).exists())
             self.assertFalse((mp / hardware.KEY_TMP_FILE_NAME).exists())
             self.assertFalse(anchor.exists())
+
+    @patch("floppy_key.hardware.is_disk_present")
+    @patch("floppy_key.hardware.get_current_mount_point")
+    @patch("floppy_key.hardware._udisks_unmount")
+    def test_ensure_mounted_skips_remount_on_user_owned_ro(
+        self, mock_unmount, mock_get_mp, mock_present
+    ):
+        mock_present.return_value = True
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            mp = Path(tmp_dir)
+            mock_get_mp.return_value = mp
+            dev = hardware.FloppyDevice("sdb", "/dev/sdb", Path("/sys/block/sdb"), "TEAC", "FD-05PUB")
+
+            with patch("os.access", return_value=False):
+                res = hardware.ensure_mounted(dev, require_writable=True)
+                self.assertEqual(res, mp)
+                mock_unmount.assert_not_called()
 
 
 if __name__ == "__main__":

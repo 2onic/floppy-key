@@ -182,6 +182,22 @@ def _udisks_unmount(device: FloppyDevice) -> None:
             logger.warning("udisksctl unmount failed for %s: %s", node, e)
 
 
+def is_device_read_only(device: FloppyDevice) -> bool:
+    """Check sysfs /sys/block/<dev>/ro to see if device is flagged read-only by kernel."""
+    ro_file = device.sysfs_path / "ro"
+    if ro_file.is_file():
+        try:
+            return ro_file.read_text().strip() == "1"
+        except Exception:
+            pass
+    return False
+
+
+def unmount_device(device: FloppyDevice) -> None:
+    """Unmount floppy device cleanly via udisksctl."""
+    _udisks_unmount(device)
+
+
 def ensure_mounted(
     device: FloppyDevice, require_writable: bool = False, read_only: bool = False
 ) -> Optional[Path]:
@@ -200,7 +216,21 @@ def ensure_mounted(
     mp = get_current_mount_point(device)
     if mp:
         if require_writable and not os.access(mp, os.W_OK):
-            logger.info("Existing mount %s is not writable by current user. Remounting...", mp)
+            # If device is flagged hardware read-only, or already owned by current user
+            # but is still not writable, remounting cannot make it writable. Skip remount.
+            try:
+                owned_by_user = (mp.stat().st_uid == os.getuid())
+            except Exception:
+                owned_by_user = False
+
+            if is_device_read_only(device) or owned_by_user:
+                logger.debug(
+                    "Mount %s is read-only due to write-protection or filesystem restriction; skipping remount.",
+                    mp,
+                )
+                return mp
+
+            logger.info("Existing mount %s is not owned by current user. Attempting remount...", mp)
             _udisks_unmount(device)
         else:
             return mp

@@ -504,40 +504,45 @@ def cmd_status(args) -> int:
     # 4. Floppy Disk Credential Check
     print("\n-- 4. Key Credential Verification --")
     if dev and hardware.is_disk_present(dev):
-        mp = hardware.ensure_mounted(dev)
-        if mp:
-            try:
-                key_data = hardware.read_key_file(mp)
-            except hardware.KeyFileError as kfe:
-                key_data = None
-                print(f"  Disk Status : [!] Key file corrupt: {kfe}")
+        was_mounted = hardware.get_current_mount_point(dev) is not None
+        mp = hardware.ensure_mounted(dev, read_only=True)
+        try:
+            if mp:
+                try:
+                    key_data = hardware.read_key_file(mp)
+                except hardware.KeyFileError as kfe:
+                    key_data = None
+                    print(f"  Disk Status : [!] Key file corrupt: {kfe}")
 
-            if key_data:
-                print(f"  Disk Key ID : {key_data.get('key_id')}")
-                print(f"  Disk User   : {key_data.get('user')}")
-                if cfg:
-                    status, detail = crypto.verify_token_state(
-                        token=key_data.get("token"),
-                        key_id=key_data.get("key_id"),
-                        host_config=cfg,
-                    )
-                    disk_counter = key_data.get("counter", 1)
-                    if status == crypto.TokenVerifyStatus.VALID:
-                        print(f"  Match Result: [OK] VALID (Counter #{disk_counter})")
-                    elif status == crypto.TokenVerifyStatus.PENDING_COMMIT:
-                        print(f"  Match Result: [OK] VALID (Pending commit #{disk_counter})")
-                    elif status == crypto.TokenVerifyStatus.CLONE_DETECTED:
-                        print(f"  Match Result: [!] CRITICAL: CLONED DISK / RETIRED TOKEN DETECTED ({detail})")
-                    elif status == crypto.TokenVerifyStatus.COMPROMISED:
-                        print(f"  Match Result: [!] HOST COMPROMISED ({detail})")
+                if key_data:
+                    print(f"  Disk Key ID : {key_data.get('key_id')}")
+                    print(f"  Disk User   : {key_data.get('user')}")
+                    if cfg:
+                        status, detail = crypto.verify_token_state(
+                            token=key_data.get("token"),
+                            key_id=key_data.get("key_id"),
+                            host_config=cfg,
+                        )
+                        disk_counter = key_data.get("counter", 1)
+                        if status == crypto.TokenVerifyStatus.VALID:
+                            print(f"  Match Result: [OK] VALID (Counter #{disk_counter})")
+                        elif status == crypto.TokenVerifyStatus.PENDING_COMMIT:
+                            print(f"  Match Result: [OK] VALID (Pending commit #{disk_counter})")
+                        elif status == crypto.TokenVerifyStatus.CLONE_DETECTED:
+                            print(f"  Match Result: [!] CRITICAL: CLONED DISK / RETIRED TOKEN DETECTED ({detail})")
+                        elif status == crypto.TokenVerifyStatus.COMPROMISED:
+                            print(f"  Match Result: [!] HOST COMPROMISED ({detail})")
+                        else:
+                            print(f"  Match Result: [FAIL] MISMATCH ({detail})")
                     else:
-                        print(f"  Match Result: [FAIL] MISMATCH ({detail})")
-                else:
-                    print("  Match Result: [-] Cannot verify (host not paired)")
-            elif not mp.joinpath(hardware.KEY_FILE_NAME).exists():
-                print("  Disk Status : [-] No .floppy-key found on disk.")
-        else:
-            print("  Disk Status : [!] Cannot mount floppy to inspect key.")
+                        print("  Match Result: [-] Cannot verify (host not paired)")
+                elif not mp.joinpath(hardware.KEY_FILE_NAME).exists():
+                    print("  Disk Status : [-] No .floppy-key found on disk.")
+            else:
+                print("  Disk Status : [!] Cannot mount floppy to inspect key.")
+        finally:
+            if not was_mounted and mp:
+                hardware.unmount_device(dev)
     else:
         print("  Disk Status : [-] No floppy inserted to inspect.")
 
