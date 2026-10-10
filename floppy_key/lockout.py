@@ -69,13 +69,16 @@ def get_failed_count() -> int:
 def record_failure() -> bool:
     """Record an authentication failure. Returns True if lockout was triggered."""
     state = load_state()
+    if state.get("locked_out", False):
+        return True
+
     count = state.get("failed_attempts", 0) + 1
-    state["failed_attempts"] = count
+    state["failed_attempts"] = min(count, MAX_FAILED_ATTEMPTS)
     if count >= MAX_FAILED_ATTEMPTS:
         state["locked_out"] = True
         logger.warning(
             "Security lockout triggered (%d/%d failed attempts). Floppy unlock disabled for this session.",
-            count,
+            MAX_FAILED_ATTEMPTS,
             MAX_FAILED_ATTEMPTS,
         )
     else:

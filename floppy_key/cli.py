@@ -10,6 +10,7 @@ Provides subcommands:
 """
 
 import argparse
+import fcntl
 import logging
 import os
 import subprocess
@@ -93,8 +94,27 @@ def cmd_pair(args) -> int:
     return 0
 
 
+def acquire_daemon_lock():
+    """Acquire exclusive flock to prevent multiple daemon instances from running concurrently."""
+    lock_dir = lockout.get_runtime_dir()
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_file = lock_dir / "daemon.lock"
+    f = open(lock_file, "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return f
+    except (BlockingIOError, OSError):
+        f.close()
+        return None
+
+
 def cmd_daemon(args) -> int:
     """Run the background media monitoring and auto-unlock loop."""
+    lock_handle = acquire_daemon_lock()
+    if not lock_handle:
+        logger.error("Another floppy-key daemon instance is already running (e.g. floppy-key.service).")
+        return 1
+
     interval = max(0.5, args.interval)
     logger.info("FloppyKey daemon started (poll interval: %.1fs)", interval)
 
@@ -171,6 +191,11 @@ def cmd_daemon(args) -> int:
     except KeyboardInterrupt:
         logger.info("Daemon received interrupt signal, shutting down.")
         return 0
+    finally:
+        try:
+            lock_handle.close()
+        except Exception:
+            pass
 
 
 def cmd_status(args) -> int:
