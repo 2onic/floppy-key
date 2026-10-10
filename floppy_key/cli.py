@@ -31,9 +31,9 @@ logger = logging.getLogger("floppy-key")
 
 def print_banner():
     banner = r"""
-  ╔═══════════════════════════════════════════════════════════╗
-  ║   💾 FloppyKey v2 - Physical Desktop Key for Linux 💾     ║
-  ╚═══════════════════════════════════════════════════════════╝
+  ===========================================================
+    FloppyKey v2 - Physical Desktop Key for Linux
+  ===========================================================
 """
     print(banner)
 
@@ -83,7 +83,7 @@ def cmd_pair(args) -> int:
     print(f"[+] Host pairing saved to: {cfg_file}")
 
     print("\n" + "=" * 55)
-    print(" 🎉 Pairing Complete! Floppy is now your physical key.")
+    print(" Pairing Complete! Floppy is now your physical key.")
     print(f"    Key ID : {host_payload['key_id']}")
     print(f"    User   : {username}")
     print("=" * 55 + "\n")
@@ -145,11 +145,11 @@ def cmd_daemon(args) -> int:
                                 token = key_data.get("token")
                                 key_id = key_data.get("key_id")
                                 if crypto.verify_token(token, key_id, host_cfg):
-                                    logger.info("✨ Key verified! Unlocking desktop session...")
+                                    logger.info("Key verified! Unlocking desktop session...")
                                     session.unlock_desktop()
                                     unlocked_for_current_insertion = True
                                 else:
-                                    logger.warning("❌ Floppy key verification failed (token or key_id mismatch).")
+                                    logger.warning("Floppy key verification failed (token or key_id mismatch).")
                                     unlocked_for_current_insertion = True
 
             time.sleep(interval)
@@ -163,7 +163,7 @@ def cmd_status(args) -> int:
     print_banner()
 
     # 1. Hardware Drive
-    print("── 1. Floppy Drive Hardware ──")
+    print("-- 1. Floppy Drive Hardware --")
     dev = hardware.find_floppy_device()
     if dev:
         print(f"  Device node : {dev.dev_path}")
@@ -173,11 +173,11 @@ def cmd_status(args) -> int:
         print("  Status      : [!] No USB floppy drive detected.")
 
     # 2. Media Presence
-    print("\n── 2. Physical Media Sensor ──")
+    print("\n-- 2. Physical Media Sensor --")
     if dev:
         present = hardware.is_disk_present(dev)
         if present:
-            print("  Status      : [✓] 1.44MB Floppy Disk PRESENT (/sys size == 2880)")
+            print("  Status      : [OK] 1.44MB Floppy Disk PRESENT (/sys size == 2880)")
             mp = hardware.get_current_mount_point(dev)
             if mp:
                 print(f"  Mount Point : {mp}")
@@ -189,10 +189,10 @@ def cmd_status(args) -> int:
         print("  Status      : [-] N/A")
 
     # 3. Host Pairing Configuration
-    print("\n── 3. Host Pairing State ──")
+    print("\n-- 3. Host Pairing State --")
     cfg = config.load_config()
     if cfg:
-        print("  Status      : [✓] PAIRED")
+        print("  Status      : [OK] PAIRED")
         print(f"  Config Path : {config.get_config_path()}")
         print(f"  Key ID      : {cfg.get('key_id')}")
         print(f"  User        : {cfg.get('user')}")
@@ -201,7 +201,7 @@ def cmd_status(args) -> int:
         print("  Status      : [-] NOT PAIRED (run 'floppy-key pair' to create key)")
 
     # 4. Floppy Disk Credential Check
-    print("\n── 4. Key Credential Verification ──")
+    print("\n-- 4. Key Credential Verification --")
     if dev and hardware.is_disk_present(dev):
         mp = hardware.ensure_mounted(dev)
         if mp:
@@ -212,9 +212,9 @@ def cmd_status(args) -> int:
                 if cfg:
                     match = crypto.verify_token(key_data.get("token"), key_data.get("key_id"), cfg)
                     if match:
-                        print("  Match Result: [✓] VALID & MATCHES HOST CONFIG")
+                        print("  Match Result: [OK] VALID & MATCHES HOST CONFIG")
                     else:
-                        print("  Match Result: [✗] MISMATCH (Token does not match host)")
+                        print("  Match Result: [FAIL] MISMATCH (Token does not match host)")
                 else:
                     print("  Match Result: [-] Cannot verify (host not paired)")
             else:
@@ -225,15 +225,15 @@ def cmd_status(args) -> int:
         print("  Disk Status : [-] No floppy inserted to inspect.")
 
     # 5. Desktop & Session
-    print("\n── 5. Desktop & Session State ──")
+    print("\n-- 5. Desktop & Session State --")
     sid = session.get_display_session_id()
     print(f"  Current User: {session.get_current_username()}")
     print(f"  Session ID  : {sid if sid else 'Not found'}")
     locked = session.is_screen_locked()
-    print(f"  Screen Saver: {'[!] LOCKED' if locked else '[✓] UNLOCKED'}")
+    print(f"  Screen Saver: {'[LOCKED]' if locked else '[UNLOCKED]'}")
 
     # 6. Service Status
-    print("\n── 6. Background Service ──")
+    print("\n-- 6. Background Service --")
     try:
         res = subprocess.run(
             ["systemctl", "--user", "is-active", "floppy-key.service"],
@@ -245,7 +245,7 @@ def cmd_status(args) -> int:
     except Exception:
         print("  systemd unit: Unknown")
 
-    print("\n" + "═" * 55)
+    print("\n" + "=" * 55)
     return 0
 
 

@@ -7,7 +7,7 @@ BIN_DIR="${HOME}/.local/bin"
 SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
 
 echo "========================================================"
-echo " 💾 FloppyKey v2 - Installing User Daemon & CLI"
+echo " FloppyKey v2 - Installing User Daemon & CLI"
 echo "========================================================"
 
 # 1. Ensure required directories
@@ -36,9 +36,9 @@ systemctl --user restart floppy-key.service
 
 echo ""
 echo "========================================================"
-echo " [✓] Installation complete!"
-echo "     CLI: ${BIN_DIR}/floppy-key"
-echo "     Service: systemctl --user status floppy-key.service"
+echo " [OK] Installation complete!"
+echo "      CLI: ${BIN_DIR}/floppy-key"
+echo "      Service: systemctl --user status floppy-key.service"
 echo ""
 echo " Quick Start:"
 echo "   floppy-key status      # Check drive and media status"

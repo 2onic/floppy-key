@@ -7,7 +7,7 @@ SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
 CONFIG_DIR="${HOME}/.config/floppy-key"
 
 echo "========================================================"
-echo " 🗑️ FloppyKey v2 - Clean Uninstaller"
+echo " FloppyKey v2 - Clean Uninstaller"
 echo "========================================================"
 
 # 1. Stop and disable systemd service
@@ -41,5 +41,5 @@ fi
 
 echo ""
 echo "========================================================"
-echo " [✓] FloppyKey v2 has been completely uninstalled."
+echo " [OK] FloppyKey v2 has been completely uninstalled."
 echo "========================================================"
