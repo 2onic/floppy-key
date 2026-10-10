@@ -273,10 +273,8 @@ def cmd_status(args) -> int:
     print("\n-- 3. Host Pairing State --")
     cfg = config.load_config()
     if cfg:
-        mode = "TPM 2.0 Sealed (PCR 7)" if config.is_tpm2_sealed() else "Software"
-        active_path = config.get_sealed_config_path() if config.is_tpm2_sealed() else config.get_config_path()
-        print(f"  Status      : [OK] PAIRED ({mode})")
-        print(f"  Config Path : {active_path}")
+        print("  Status      : [OK] PAIRED")
+        print(f"  Config Path : {config.get_config_path()}")
         print(f"  Key ID      : {cfg.get('key_id')}")
         print(f"  User        : {cfg.get('user')}")
         print(f"  Paired At   : {cfg.get('paired_at')}")
@@ -350,7 +348,7 @@ def cmd_revoke(args) -> int:
     print("[*] Revoking FloppyKey pairing...")
     removed_host = config.revoke_config()
     if removed_host:
-        print("[+] Host pairing credentials deleted.")
+        print("[+] Host pairing credentials deleted (~/.config/floppy-key/config.json).")
     else:
         print("[-] Host was not paired.")
 
