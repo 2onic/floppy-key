@@ -141,28 +141,53 @@ def get_current_mount_point(device: FloppyDevice) -> Optional[Path]:
     return None
 
 
-def ensure_mounted(device: FloppyDevice) -> Optional[Path]:
+def ensure_mounted(device: FloppyDevice, require_writable: bool = False) -> Optional[Path]:
     """Ensure the floppy disk is mounted and return the mount path.
 
-    Mounts via udisksctl if not already mounted.
+    Mounts via udisksctl with current user's UID/GID to guarantee write access.
+    If already mounted but not writable by the user, remounts cleanly.
     """
     if not is_disk_present(device):
         logger.debug("Cannot mount: physical disk not present.")
         return None
 
-    # Check if already mounted
     mp = get_current_mount_point(device)
     if mp:
-        return mp
+        if require_writable and not os.access(mp, os.W_OK):
+            logger.info("Existing mount %s is not writable by current user. Remounting...", mp)
+            try:
+                subprocess.run(
+                    ["udisksctl", "unmount", "-b", device.dev_path, "--force", "--no-user-interaction"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+            except Exception as e:
+                logger.warning("Unmount before remount failed: %s", e)
+            mp = None
+        else:
+            return mp
 
-    # Try mounting via udisksctl
+    # Try mounting via udisksctl with explicit user ownership options
+    uid = os.getuid()
+    gid = os.getgid()
+    opts = f"uid={uid},gid={gid}"
+
     try:
         res = subprocess.run(
-            ["udisksctl", "mount", "-b", device.dev_path, "--no-user-interaction"],
+            ["udisksctl", "mount", "-b", device.dev_path, "-o", opts, "--no-user-interaction"],
             capture_output=True,
             text=True,
             timeout=10,
         )
+        if res.returncode != 0:
+            logger.debug("Mount with options '%s' failed, retrying without options: %s", opts, res.stderr.strip())
+            res = subprocess.run(
+                ["udisksctl", "mount", "-b", device.dev_path, "--no-user-interaction"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
         # Parse output: "Mounted /dev/sdb at /run/media/colimy/disk"
         for part in res.stdout.split():
             if part.startswith("/"):
@@ -216,14 +241,24 @@ def read_key_file(mount_point: Path) -> Optional[Dict[str, Any]]:
 def write_key_file(mount_point: Path, payload: Dict[str, Any]) -> Path:
     """Write the .floppy-key token file and sync filesystem to physical media."""
     key_path = mount_point / KEY_FILE_NAME
-    with open(key_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+
+    # Remove existing key file if present to prevent permission conflict on overwrite
+    if key_path.exists():
+        try:
+            key_path.unlink()
+        except Exception as e:
+            logger.debug("Could not unlink existing key file: %s", e)
 
     try:
-        os.chmod(key_path, 0o600)
-    except Exception:
-        pass  # FAT filesystems don't support POSIX chmod
+        with open(key_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+    except PermissionError as e:
+        raise PermissionError(
+            f"Cannot write key to floppy disk: {e}.\n"
+            "Please check if the physical write-protect tab on the back of the 3.5\" floppy disk is open (locked) "
+            "or if the disk is mounted read-only."
+        ) from e
 
     # Flush all buffers to magnetic media
     os.sync()

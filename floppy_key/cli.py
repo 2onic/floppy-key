@@ -63,7 +63,7 @@ def cmd_pair(args) -> int:
             print("[-] Pairing aborted.")
             return 0
 
-    mount_point = hardware.ensure_mounted(dev)
+    mount_point = hardware.ensure_mounted(dev, require_writable=True)
     if not mount_point:
         print("[!] Error: Could not mount floppy disk via udisks.")
         return 1
@@ -273,7 +273,7 @@ def cmd_revoke(args) -> int:
     if args.wipe_disk:
         dev = hardware.find_floppy_device()
         if dev and hardware.is_disk_present(dev):
-            mp = hardware.ensure_mounted(dev)
+            mp = hardware.ensure_mounted(dev, require_writable=True)
             if mp:
                 wiped = hardware.wipe_key_file(mp)
                 if wiped:
