@@ -265,12 +265,62 @@ def write_key_file(mount_point: Path, payload: Dict[str, Any]) -> Path:
     return key_path
 
 
+VOLUME_ANCHOR_FILE = ".floppy-uuid"
+
+
+def get_disk_volume_id(device: FloppyDevice, mount_point: Path, create_if_missing: bool = False) -> str:
+    """Retrieve or initialize a persistent volume identifier for the floppy media.
+
+    Combines the filesystem UUID (if present via udev) with a persistent on-disk anchor.
+    """
+    udev_uuid = ""
+    try:
+        res = subprocess.run(
+            ["udevadm", "info", "-q", "property", "-p", str(device.sysfs_path)],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        for line in res.stdout.splitlines():
+            if line.startswith("ID_FS_UUID="):
+                udev_uuid = line.split("=", 1)[1].strip()
+                break
+    except Exception:
+        pass
+
+    anchor_path = mount_point / VOLUME_ANCHOR_FILE
+    disk_anchor = ""
+    if anchor_path.is_file():
+        try:
+            disk_anchor = anchor_path.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+
+    if not disk_anchor and create_if_missing:
+        import uuid
+        disk_anchor = str(uuid.uuid4())
+        try:
+            anchor_path.write_text(disk_anchor + "\n", encoding="utf-8")
+            os.sync()
+        except Exception as e:
+            logger.debug("Failed writing volume anchor: %s", e)
+
+    if udev_uuid and disk_anchor:
+        return f"{udev_uuid}-{disk_anchor}"
+    elif udev_uuid:
+        return udev_uuid
+    elif disk_anchor:
+        return disk_anchor
+    else:
+        return "unidentified-volume"
+
+
 def wipe_key_file(mount_point: Path) -> bool:
-    """Wipe and remove .floppy-key from the floppy disk."""
+    """Wipe and remove .floppy-key and .floppy-uuid from the floppy disk."""
     key_path = mount_point / KEY_FILE_NAME
+    wiped = False
     if key_path.is_file():
         try:
-            # Overwrite with random bytes before unlink
             sz = key_path.stat().st_size
             if sz > 0:
                 with open(key_path, "wb") as f:
@@ -278,7 +328,17 @@ def wipe_key_file(mount_point: Path) -> bool:
                 os.sync()
             key_path.unlink()
             os.sync()
-            return True
+            wiped = True
         except Exception as e:
             logger.warning("Failed to wipe key file: %s", e)
-    return False
+
+    anchor_path = mount_point / VOLUME_ANCHOR_FILE
+    if anchor_path.is_file():
+        try:
+            anchor_path.unlink()
+            os.sync()
+            wiped = True
+        except Exception:
+            pass
+
+    return wiped

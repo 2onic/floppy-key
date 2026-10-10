@@ -28,10 +28,10 @@ def get_machine_id() -> str:
     return "unknown-machine"
 
 
-def generate_key_pair(username: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def generate_key_pair(username: str, volume_id: str = "") -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Generate a high-entropy floppy key token and corresponding host verification record.
 
-    Binds the generated host hash to the unique machine-id of this system.
+    Binds the generated host hash to the unique machine-id and volume identifier.
 
     Returns:
         (floppy_payload, host_payload)
@@ -42,8 +42,13 @@ def generate_key_pair(username: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     created_at = datetime.now(timezone.utc).isoformat()
     machine_id = get_machine_id()
 
-    # SHA-256(salt:machine_id:token)
-    digest = hashlib.sha256(f"{salt}:{machine_id}:{token}".encode("utf-8")).hexdigest()
+    # SHA-256(salt:machine_id:volume_id:token)
+    payload_buf = bytearray(f"{salt}:{machine_id}:{volume_id}:{token}".encode("utf-8"))
+    digest = hashlib.sha256(payload_buf).hexdigest()
+
+    # Zero out sensitive buffer
+    for i in range(len(payload_buf)):
+        payload_buf[i] = 0
 
     floppy_payload = {
         "version": 2,
@@ -57,6 +62,7 @@ def generate_key_pair(username: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         "version": 2,
         "key_id": key_id,
         "machine_id": machine_id,
+        "volume_id": volume_id,
         "salt": salt,
         "hash": digest,
         "user": username,
@@ -66,8 +72,8 @@ def generate_key_pair(username: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     return floppy_payload, host_payload
 
 
-def verify_token(token: str, key_id: str, host_config: Dict[str, Any]) -> bool:
-    """Verify that the floppy token and key_id match the host configuration and machine ID."""
+def verify_token(token: str, key_id: str, host_config: Dict[str, Any], volume_id: str = "") -> bool:
+    """Verify that the floppy token and key_id match the host configuration, machine ID, and volume ID."""
     if not token or not key_id or not host_config:
         return False
 
@@ -75,6 +81,7 @@ def verify_token(token: str, key_id: str, host_config: Dict[str, Any]) -> bool:
     stored_salt = host_config.get("salt")
     stored_hash = host_config.get("hash")
     stored_machine_id = host_config.get("machine_id")
+    stored_volume_id = host_config.get("volume_id")
 
     if not stored_key_id or not stored_salt or not stored_hash:
         return False
@@ -85,19 +92,44 @@ def verify_token(token: str, key_id: str, host_config: Dict[str, Any]) -> bool:
     if stored_machine_id and not hmac.compare_digest(stored_machine_id, current_machine_id):
         return False
 
+    # If volume_id is recorded in host config, enforce strict match
+    if stored_volume_id and volume_id and not hmac.compare_digest(stored_volume_id, volume_id):
+        return False
+
     # Check key_id matches
     if not hmac.compare_digest(key_id, stored_key_id):
         return False
 
-    # Compute expected hash: SHA-256(salt:machine_id:token)
-    expected_hash = hashlib.sha256(f"{stored_salt}:{current_machine_id}:{token}".encode("utf-8")).hexdigest()
-    if hmac.compare_digest(expected_hash, stored_hash):
+    # Check with volume_id
+    calc_buf = bytearray(f"{stored_salt}:{current_machine_id}:{volume_id}:{token}".encode("utf-8"))
+    expected_hash = hashlib.sha256(calc_buf).hexdigest()
+    matched = hmac.compare_digest(expected_hash, stored_hash)
+
+    # Zero buffer
+    for i in range(len(calc_buf)):
+        calc_buf[i] = 0
+
+    if matched:
         return True
 
-    # Backward compatibility fallback for pairings created before machine-id binding
+    # Fallback without volume_id for backward compatibility
+    calc_buf = bytearray(f"{stored_salt}:{current_machine_id}:{token}".encode("utf-8"))
+    expected_hash = hashlib.sha256(calc_buf).hexdigest()
+    matched = hmac.compare_digest(expected_hash, stored_hash)
+    for i in range(len(calc_buf)):
+        calc_buf[i] = 0
+
+    if matched:
+        return True
+
+    # Legacy fallback without machine_id
     if not stored_machine_id:
-        legacy_hash = hashlib.sha256(f"{stored_salt}:{token}".encode("utf-8")).hexdigest()
-        if hmac.compare_digest(legacy_hash, stored_hash):
+        calc_buf = bytearray(f"{stored_salt}:{token}".encode("utf-8"))
+        legacy_hash = hashlib.sha256(calc_buf).hexdigest()
+        matched = hmac.compare_digest(legacy_hash, stored_hash)
+        for i in range(len(calc_buf)):
+            calc_buf[i] = 0
+        if matched:
             return True
 
     return False

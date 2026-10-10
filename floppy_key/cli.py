@@ -22,6 +22,7 @@ from floppy_key import config
 from floppy_key import crypto
 from floppy_key import hardware
 from floppy_key import lockout
+from floppy_key import security
 from floppy_key import session
 
 logging.basicConfig(
@@ -43,6 +44,7 @@ def print_banner():
 
 def cmd_pair(args) -> int:
     """Pair an inserted floppy disk with the current user account."""
+    security.disable_coredump()
     username = session.get_current_username()
     print(f"[*] Pairing floppy key for user: {username}")
 
@@ -73,9 +75,10 @@ def cmd_pair(args) -> int:
 
     print(f"[*] Floppy disk mounted at: {mount_point}")
 
-    # Generate cryptographic key pair
+    # Generate volume identifier and cryptographic key pair
+    volume_id = hardware.get_disk_volume_id(dev, mount_point, create_if_missing=True)
     print("[*] Generating 256-bit high-entropy secret token & SHA-256 salt...")
-    floppy_payload, host_payload = crypto.generate_key_pair(username)
+    floppy_payload, host_payload = crypto.generate_key_pair(username, volume_id)
 
     # Write key to floppy
     key_file = hardware.write_key_file(mount_point, floppy_payload)
@@ -110,6 +113,7 @@ def acquire_daemon_lock():
 
 def cmd_daemon(args) -> int:
     """Run the background media monitoring and auto-unlock loop."""
+    security.disable_coredump()
     lock_handle = acquire_daemon_lock()
     if not lock_handle:
         logger.error("Another floppy-key daemon instance is already running (e.g. floppy-key.service).")
@@ -120,9 +124,24 @@ def cmd_daemon(args) -> int:
 
     last_present = None
     unlocked_for_current_insertion = False
+    last_screen_locked = session.is_screen_locked()
+    alert_notified_for_lockout = False
 
     try:
         while True:
+            # Monitor lock state transition to notify user upon manual password unlock
+            current_screen_locked = session.is_screen_locked()
+            if last_screen_locked and not current_screen_locked:
+                if lockout.is_locked_out() and not alert_notified_for_lockout:
+                    security.send_security_alert(
+                        "FloppyKey Security Notice",
+                        f"Notice: {lockout.get_failed_count()} unauthorized unlock attempts were blocked while locked.",
+                    )
+                    alert_notified_for_lockout = True
+            elif not current_screen_locked and not lockout.is_locked_out():
+                alert_notified_for_lockout = False
+            last_screen_locked = current_screen_locked
+
             dev = hardware.find_floppy_device()
             if not dev:
                 if last_present is not None:
@@ -177,13 +196,14 @@ def cmd_daemon(args) -> int:
                                 else:
                                     token = key_data.get("token")
                                     key_id = key_data.get("key_id")
-                                    if crypto.verify_token(token, key_id, host_cfg):
+                                    volume_id = hardware.get_disk_volume_id(dev, mount_point)
+                                    if crypto.verify_token(token, key_id, host_cfg, volume_id):
                                         lockout.record_success()
                                         logger.info("Key verified! Unlocking desktop session...")
                                         session.unlock_desktop()
                                         unlocked_for_current_insertion = True
                                     else:
-                                        logger.warning("Floppy key verification failed (token or key_id mismatch).")
+                                        logger.warning("Floppy key verification failed (token, key_id, or volume mismatch).")
                                         lockout.record_failure()
                                         unlocked_for_current_insertion = True
 
@@ -250,7 +270,8 @@ def cmd_status(args) -> int:
                 print(f"  Disk Key ID : {key_data.get('key_id')}")
                 print(f"  Disk User   : {key_data.get('user')}")
                 if cfg:
-                    match = crypto.verify_token(key_data.get("token"), key_data.get("key_id"), cfg)
+                    volume_id = hardware.get_disk_volume_id(dev, mp)
+                    match = crypto.verify_token(key_data.get("token"), key_data.get("key_id"), cfg, volume_id)
                     if match:
                         print("  Match Result: [OK] VALID & MATCHES HOST CONFIG")
                     else:

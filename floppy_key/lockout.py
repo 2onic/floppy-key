@@ -81,6 +81,14 @@ def record_failure() -> bool:
             MAX_FAILED_ATTEMPTS,
             MAX_FAILED_ATTEMPTS,
         )
+        try:
+            from floppy_key import security
+            security.send_security_alert(
+                "FloppyKey Security Alert",
+                f"Security lockout triggered: {MAX_FAILED_ATTEMPTS} unauthorized floppy unlock attempts blocked.",
+            )
+        except Exception:
+            pass
     else:
         logger.warning(
             "Authentication failure recorded (%d/%d failed attempts).",
