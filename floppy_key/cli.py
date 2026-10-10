@@ -19,6 +19,7 @@ from floppy_key import __version__
 from floppy_key import config
 from floppy_key import crypto
 from floppy_key import hardware
+from floppy_key import lockout
 from floppy_key import session
 
 logging.basicConfig(
@@ -81,6 +82,7 @@ def cmd_pair(args) -> int:
     # Save host config
     cfg_file = config.save_config(host_payload)
     print(f"[+] Host pairing saved to: {cfg_file}")
+    lockout.reset_lockout()
 
     print("\n" + "=" * 55)
     print(" Pairing Complete! Floppy is now your physical key.")
@@ -128,29 +130,41 @@ def cmd_daemon(args) -> int:
 
                 # If disk is present and we haven't processed unlock for this insertion
                 if not unlocked_for_current_insertion:
-                    host_cfg = config.load_config()
-                    if not host_cfg:
-                        logger.warning("No host pairing config found (~/.config/floppy-key/config.json).")
+                    if lockout.is_locked_out():
+                        logger.warning(
+                            "Floppy unlock disabled due to previous failed attempts. Password unlock required."
+                        )
                         unlocked_for_current_insertion = True
                     else:
-                        mount_point = hardware.ensure_mounted(dev)
-                        if not mount_point:
-                            logger.warning("Failed to access mounted floppy disk.")
+                        host_cfg = config.load_config()
+                        if not host_cfg:
+                            logger.warning("No host pairing config found (~/.config/floppy-key/config.json).")
+                            lockout.record_failure()
+                            unlocked_for_current_insertion = True
                         else:
-                            key_data = hardware.read_key_file(mount_point)
-                            if not key_data:
-                                logger.warning("No valid .floppy-key found on the inserted disk.")
+                            mount_point = hardware.ensure_mounted(dev)
+                            if not mount_point:
+                                logger.warning("Failed to access mounted floppy disk.")
+                                lockout.record_failure()
                                 unlocked_for_current_insertion = True
                             else:
-                                token = key_data.get("token")
-                                key_id = key_data.get("key_id")
-                                if crypto.verify_token(token, key_id, host_cfg):
-                                    logger.info("Key verified! Unlocking desktop session...")
-                                    session.unlock_desktop()
+                                key_data = hardware.read_key_file(mount_point)
+                                if not key_data:
+                                    logger.warning("No valid .floppy-key found on the inserted disk.")
+                                    lockout.record_failure()
                                     unlocked_for_current_insertion = True
                                 else:
-                                    logger.warning("Floppy key verification failed (token or key_id mismatch).")
-                                    unlocked_for_current_insertion = True
+                                    token = key_data.get("token")
+                                    key_id = key_data.get("key_id")
+                                    if crypto.verify_token(token, key_id, host_cfg):
+                                        lockout.record_success()
+                                        logger.info("Key verified! Unlocking desktop session...")
+                                        session.unlock_desktop()
+                                        unlocked_for_current_insertion = True
+                                    else:
+                                        logger.warning("Floppy key verification failed (token or key_id mismatch).")
+                                        lockout.record_failure()
+                                        unlocked_for_current_insertion = True
 
             time.sleep(interval)
     except KeyboardInterrupt:
@@ -283,6 +297,7 @@ def cmd_revoke(args) -> int:
         else:
             print("[-] No floppy disk present to wipe.")
 
+    lockout.reset_lockout()
     print("[+] Revocation complete.")
     return 0
 

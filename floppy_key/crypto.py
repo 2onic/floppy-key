@@ -1,19 +1,37 @@
 """Cryptographic operations for FloppyKey v2.
 
 Zero third-party dependencies: relies only on Python standard library
-(secrets, hashlib, hmac, uuid, datetime).
+(secrets, hashlib, hmac, uuid, datetime, pathlib).
+Binds token verification to host machine-id.
 """
 
 from datetime import datetime, timezone
 import hashlib
 import hmac
+from pathlib import Path
 import secrets
 from typing import Any, Dict, Tuple
 import uuid
 
 
+def get_machine_id() -> str:
+    """Retrieve host machine-id to bind key to this physical system."""
+    for p in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+        path = Path(p)
+        if path.is_file():
+            try:
+                content = path.read_text(encoding="utf-8").strip()
+                if content:
+                    return content
+            except Exception:
+                pass
+    return "unknown-machine"
+
+
 def generate_key_pair(username: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Generate a high-entropy floppy key token and corresponding host verification record.
+
+    Binds the generated host hash to the unique machine-id of this system.
 
     Returns:
         (floppy_payload, host_payload)
@@ -22,9 +40,10 @@ def generate_key_pair(username: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     token = secrets.token_urlsafe(32)
     salt = secrets.token_hex(16)
     created_at = datetime.now(timezone.utc).isoformat()
+    machine_id = get_machine_id()
 
-    # SHA-256(salt + token)
-    digest = hashlib.sha256(f"{salt}:{token}".encode("utf-8")).hexdigest()
+    # SHA-256(salt:machine_id:token)
+    digest = hashlib.sha256(f"{salt}:{machine_id}:{token}".encode("utf-8")).hexdigest()
 
     floppy_payload = {
         "version": 2,
@@ -37,6 +56,7 @@ def generate_key_pair(username: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     host_payload = {
         "version": 2,
         "key_id": key_id,
+        "machine_id": machine_id,
         "salt": salt,
         "hash": digest,
         "user": username,
@@ -47,23 +67,37 @@ def generate_key_pair(username: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
 
 def verify_token(token: str, key_id: str, host_config: Dict[str, Any]) -> bool:
-    """Verify that the floppy token and key_id match the host configuration."""
+    """Verify that the floppy token and key_id match the host configuration and machine ID."""
     if not token or not key_id or not host_config:
         return False
 
     stored_key_id = host_config.get("key_id")
     stored_salt = host_config.get("salt")
     stored_hash = host_config.get("hash")
+    stored_machine_id = host_config.get("machine_id")
 
     if not stored_key_id or not stored_salt or not stored_hash:
+        return False
+
+    current_machine_id = get_machine_id()
+
+    # If machine_id is recorded in host config, enforce strict match
+    if stored_machine_id and not hmac.compare_digest(stored_machine_id, current_machine_id):
         return False
 
     # Check key_id matches
     if not hmac.compare_digest(key_id, stored_key_id):
         return False
 
-    # Compute expected hash
-    expected_hash = hashlib.sha256(f"{stored_salt}:{token}".encode("utf-8")).hexdigest()
+    # Compute expected hash: SHA-256(salt:machine_id:token)
+    expected_hash = hashlib.sha256(f"{stored_salt}:{current_machine_id}:{token}".encode("utf-8")).hexdigest()
+    if hmac.compare_digest(expected_hash, stored_hash):
+        return True
 
-    # Constant-time comparison to prevent timing attacks
-    return hmac.compare_digest(expected_hash, stored_hash)
+    # Backward compatibility fallback for pairings created before machine-id binding
+    if not stored_machine_id:
+        legacy_hash = hashlib.sha256(f"{stored_salt}:{token}".encode("utf-8")).hexdigest()
+        if hmac.compare_digest(legacy_hash, stored_hash):
+            return True
+
+    return False

@@ -8,5 +8,18 @@ ExecStart=%h/.local/bin/floppy-key daemon
 Restart=on-failure
 RestartSec=3
 
+# Sandboxing & Security Hardening
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=yes
+LockPersonality=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+UMask=0077
+
 [Install]
 WantedBy=default.target
