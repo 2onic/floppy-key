@@ -7,6 +7,7 @@ requiring root privileges or external dependencies.
 import getpass
 import logging
 import os
+import pwd
 import subprocess
 from typing import Optional
 
@@ -14,8 +15,11 @@ logger = logging.getLogger("floppy_key.session")
 
 
 def get_current_username() -> str:
-    """Get the current running username."""
-    return os.environ.get("USER") or getpass.getuser()
+    """Get the current running username via passwd entry or fallback."""
+    try:
+        return pwd.getpwuid(os.getuid()).pw_name
+    except Exception:
+        return os.environ.get("USER") or getpass.getuser()
 
 
 def get_display_session_id() -> Optional[str]:
@@ -64,7 +68,8 @@ def get_display_session_id() -> Optional[str]:
 
 
 def is_screen_locked() -> bool:
-    """Check if GNOME ScreenSaver is currently locked and active."""
+    """Check if GNOME ScreenSaver or systemd-logind session is currently locked."""
+    # 1. Primary check: GNOME ScreenSaver GetActive via user D-Bus
     try:
         res = subprocess.run(
             ["busctl", "--user", "call", "org.gnome.ScreenSaver",
@@ -72,15 +77,38 @@ def is_screen_locked() -> bool:
             capture_output=True,
             text=True,
             check=True,
-            timeout=3,
+            timeout=2,
         )
-        # Output format is "b true" or "b false"
         out = res.stdout.strip()
-        return "true" in out
+        # Output format is "b true" or "b false"
+        if "false" in out:
+            return False
+        if "true" in out:
+            return True
     except Exception as e:
         logger.debug("Error checking ScreenSaver GetActive: %s", e)
-        # Default to True if we cannot determine, so unlock is attempted
-        return True
+
+    # 2. Secondary check: loginctl show-session LockedHint
+    sid = get_display_session_id()
+    if sid:
+        try:
+            res = subprocess.run(
+                ["loginctl", "show-session", sid, "-p", "LockedHint", "--value"],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=2,
+            )
+            val = res.stdout.strip().lower()
+            if val in ("yes", "true", "1"):
+                return True
+            if val in ("no", "false", "0"):
+                return False
+        except Exception as e:
+            logger.debug("loginctl show-session LockedHint failed: %s", e)
+
+    # 3. Default to False when screen state cannot be determined
+    return False
 
 
 def wake_up_screen() -> bool:

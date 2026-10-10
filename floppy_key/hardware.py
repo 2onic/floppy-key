@@ -6,10 +6,12 @@ Bypasses the Linux VFS page-cache trap by directly reading /sys/block/<dev>/size
 """
 
 from dataclasses import dataclass
+import errno
 import json
 import logging
 import os
 from pathlib import Path
+import re
 import subprocess
 import time
 from typing import Any, Dict, Optional
@@ -17,7 +19,17 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger("floppy_key.hardware")
 
 KEY_FILE_NAME = ".floppy-key"
+KEY_TMP_FILE_NAME = f"{KEY_FILE_NAME}.tmp"
+LEGACY_VOLUME_ANCHOR_FILE = ".floppy-uuid"
 FLOPPY_SECTOR_COUNT = 2880  # 1.44MB (2880 * 512 bytes)
+
+
+class KeyFileError(Exception):
+    """A key file exists on the disk but is unreadable or malformed."""
+
+
+class WriteProtectedError(PermissionError):
+    """The floppy could not be written at all (nothing was modified)."""
 
 
 @dataclass
@@ -39,16 +51,14 @@ def find_floppy_device() -> Optional[FloppyDevice]:
     if not sys_block.is_dir():
         return None
 
-    # Search all block devices
     candidates = []
     for item in sys_block.iterdir():
-        if item.name.startswith("loop") or item.name.startswith("zram") or item.name.startswith("nvme"):
+        if item.name.startswith(("loop", "zram", "nvme", "dm-", "md", "sr", "ram")):
             continue
 
         dev_name = item.name
         dev_path = f"/dev/{dev_name}"
 
-        # Inspect udev properties
         try:
             res = subprocess.run(
                 ["udevadm", "info", "-q", "property", "-p", str(item)],
@@ -67,7 +77,6 @@ def find_floppy_device() -> Optional[FloppyDevice]:
             vendor = props.get("ID_VENDOR", "")
             model = props.get("ID_MODEL", "")
 
-            # Check if identified as floppy
             is_floppy = False
             if id_type == "floppy":
                 is_floppy = True
@@ -77,8 +86,7 @@ def find_floppy_device() -> Optional[FloppyDevice]:
                 size_file = item / "size"
                 if size_file.is_file():
                     try:
-                        sz = int(size_file.read_text().strip())
-                        if sz == FLOPPY_SECTOR_COUNT:
+                        if int(size_file.read_text().strip()) == FLOPPY_SECTOR_COUNT:
                             is_floppy = True
                     except Exception:
                         pass
@@ -97,13 +105,17 @@ def find_floppy_device() -> Optional[FloppyDevice]:
             logger.debug("Failed checking block device %s: %s", dev_name, e)
 
     if candidates:
-        # Prefer device with media inserted if multiple
         for c in candidates:
             if is_disk_present(c):
                 return c
         return candidates[0]
 
     return None
+
+
+def device_still_attached(device: FloppyDevice) -> bool:
+    """Cheap check that a previously discovered drive is still connected."""
+    return device.sysfs_path.exists()
 
 
 def is_disk_present(device: FloppyDevice) -> bool:
@@ -117,22 +129,38 @@ def is_disk_present(device: FloppyDevice) -> bool:
         return False
 
     try:
-        size = int(size_file.read_text().strip())
-        return size == FLOPPY_SECTOR_COUNT
+        return int(size_file.read_text().strip()) == FLOPPY_SECTOR_COUNT
     except Exception:
         return False
 
 
+_MOUNT_ESCAPE_RE = re.compile(r"\\([0-7]{3})")
+
+
+def unescape_mount_path(raw: str) -> str:
+    """Decode octal escapes (\\040, \\011, \\012, \\134) used in /proc/mounts."""
+    return _MOUNT_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 8)), raw)
+
+
+def get_device_nodes(device: FloppyDevice) -> list[str]:
+    """Return candidates for mountable device nodes (partition 1 if present, else disk)."""
+    nodes = []
+    part1 = device.sysfs_path / f"{device.name}1"
+    if part1.is_dir():
+        nodes.append(f"/dev/{device.name}1")
+    nodes.append(device.dev_path)
+    return nodes
+
+
 def get_current_mount_point(device: FloppyDevice) -> Optional[Path]:
     """Check /proc/mounts for the existing mount point of the floppy device."""
+    candidate_devs = set(get_device_nodes(device))
     try:
         with open("/proc/mounts", "r", encoding="utf-8") as f:
             for line in f:
                 parts = line.split()
-                if len(parts) >= 2 and parts[0] == device.dev_path:
-                    # In /proc/mounts spaces are escaped as \040
-                    raw_mp = parts[1].replace("\\040", " ")
-                    mp = Path(raw_mp)
+                if len(parts) >= 2 and parts[0] in candidate_devs:
+                    mp = Path(unescape_mount_path(parts[1]))
                     if mp.is_dir():
                         return mp
     except Exception as e:
@@ -141,11 +169,29 @@ def get_current_mount_point(device: FloppyDevice) -> Optional[Path]:
     return None
 
 
-def ensure_mounted(device: FloppyDevice, require_writable: bool = False) -> Optional[Path]:
+def _udisks_unmount(device: FloppyDevice) -> None:
+    for node in get_device_nodes(device):
+        try:
+            subprocess.run(
+                ["udisksctl", "unmount", "-b", node, "--force", "--no-user-interaction"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except Exception as e:
+            logger.warning("udisksctl unmount failed for %s: %s", node, e)
+
+
+def ensure_mounted(
+    device: FloppyDevice, require_writable: bool = False, read_only: bool = False
+) -> Optional[Path]:
     """Ensure the floppy disk is mounted and return the mount path.
 
-    Mounts via udisksctl with current user's UID/GID to guarantee write access.
-    If already mounted but not writable by the user, remounts cleanly.
+    - require_writable: if an existing mount is not writable, remount once.
+      The returned mount may still be read-only (e.g. write-protect tab set);
+      callers that need to write must handle WriteProtectedError.
+    - read_only: when a fresh mount is needed, mount with `ro` to minimise
+      filesystem writes on untrusted media (used at the lock screen).
     """
     if not is_disk_present(device):
         logger.debug("Cannot mount: physical disk not present.")
@@ -155,49 +201,45 @@ def ensure_mounted(device: FloppyDevice, require_writable: bool = False) -> Opti
     if mp:
         if require_writable and not os.access(mp, os.W_OK):
             logger.info("Existing mount %s is not writable by current user. Remounting...", mp)
-            try:
-                subprocess.run(
-                    ["udisksctl", "unmount", "-b", device.dev_path, "--force", "--no-user-interaction"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-            except Exception as e:
-                logger.warning("Unmount before remount failed: %s", e)
-            mp = None
+            _udisks_unmount(device)
         else:
             return mp
 
-    # Try mounting via udisksctl with explicit user ownership options
-    uid = os.getuid()
-    gid = os.getgid()
-    opts = f"uid={uid},gid={gid}"
+    base_opts = ["ro"] if (read_only and not require_writable) else []
+    attempts = [
+        ",".join(base_opts + [f"uid={os.getuid()}", f"gid={os.getgid()}"]),
+        ",".join(base_opts),
+    ]
 
+    target_node = get_device_nodes(device)[0]
     try:
-        res = subprocess.run(
-            ["udisksctl", "mount", "-b", device.dev_path, "-o", opts, "--no-user-interaction"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if res.returncode != 0:
-            logger.debug("Mount with options '%s' failed, retrying without options: %s", opts, res.stderr.strip())
-            res = subprocess.run(
-                ["udisksctl", "mount", "-b", device.dev_path, "--no-user-interaction"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        # Parse output: "Mounted /dev/sdb at /run/media/colimy/disk"
-        for part in res.stdout.split():
-            if part.startswith("/"):
-                p = Path(part)
+        res = None
+        for opts in attempts:
+            cmd = ["udisksctl", "mount", "-b", target_node, "--no-user-interaction"]
+            if opts:
+                cmd += ["-o", opts]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if res.returncode == 0:
+                break
+            logger.debug("Mount with options '%s' failed: %s", opts, res.stderr.strip())
+
+        # Parse output: "Mounted /dev/sdb at /run/media/colimy/FLOPPY DISK."
+        if res is not None and res.returncode == 0:
+            out = res.stdout.strip()
+            if " at " in out:
+                raw_target = out.split(" at ", 1)[1].rstrip(".")
+                p = Path(raw_target)
                 if p.is_dir():
                     return p
+            for part in out.split():
+                if part.startswith("/"):
+                    p = Path(part.rstrip("."))
+                    if p.is_dir():
+                        return p
     except Exception as e:
         logger.warning("udisksctl mount failed: %s", e)
 
-    # Re-check mount table in case udisksctl succeeded asynchronously
+    # Re-check mount table in case udisksctl succeeded but output was not parseable
     time.sleep(0.5)
     return get_current_mount_point(device)
 
@@ -213,134 +255,125 @@ def force_unmount_if_stale(device: FloppyDevice) -> None:
     mp = get_current_mount_point(device)
     if mp:
         logger.info("Cleaning up stale mount for ejected disk: %s", mp)
-        try:
-            subprocess.run(
-                ["udisksctl", "unmount", "-b", device.dev_path, "--force", "--no-user-interaction"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-        except Exception as e:
-            logger.debug("Cleanup unmount failed: %s", e)
+        _udisks_unmount(device)
+
+
+def _parse_key_file(path: Path) -> Dict[str, Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        raise KeyFileError(f"{path.name}: unreadable ({e})") from e
+
+    if not isinstance(data, dict):
+        raise KeyFileError(f"{path.name}: not a JSON object")
+    for field in ("key_id", "token"):
+        value = data.get(field)
+        if not isinstance(value, str) or not value or not value.isascii():
+            raise KeyFileError(f"{path.name}: field '{field}' missing or malformed")
+    return data
 
 
 def read_key_file(mount_point: Path) -> Optional[Dict[str, Any]]:
-    """Read and parse the .floppy-key token file from the mounted disk."""
-    key_path = mount_point / KEY_FILE_NAME
-    if not key_path.is_file():
-        return None
+    """Read and validate the key file from the mounted disk.
 
-    try:
-        with open(key_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        logger.warning("Failed to parse key file %s: %s", key_path, e)
-        return None
+    Falls back to the temporary file left by an interrupted write, since
+    rename on FAT is not crash-atomic.
+
+    Returns:
+        The key payload, or None if no key file exists at all.
+    Raises:
+        KeyFileError if a key file exists but neither copy is valid.
+    """
+    key_path = mount_point / KEY_FILE_NAME
+    tmp_path = mount_point / KEY_TMP_FILE_NAME
+
+    primary_error: Optional[KeyFileError] = None
+    if key_path.is_file():
+        try:
+            return _parse_key_file(key_path)
+        except KeyFileError as e:
+            primary_error = e
+            logger.warning("Primary key file invalid: %s", e)
+
+    if tmp_path.is_file():
+        try:
+            data = _parse_key_file(tmp_path)
+            logger.info("Recovered key from interrupted write (%s).", KEY_TMP_FILE_NAME)
+            return data
+        except KeyFileError as e:
+            raise primary_error or e
+
+    if primary_error:
+        raise primary_error
+    return None
+
+
+_WRITE_PROTECT_ERRNOS = (errno.EACCES, errno.EPERM, errno.EROFS)
 
 
 def write_key_file(mount_point: Path, payload: Dict[str, Any]) -> Path:
-    """Write the .floppy-key token file atomically and sync filesystem to physical media."""
+    """Write the key file via temp file + rename and sync to physical media.
+
+    Raises:
+        WriteProtectedError: the temp file could not even be created, so the
+            disk is guaranteed to be unmodified.
+        OSError: any later failure; the on-disk state is then uncertain.
+    """
     key_path = mount_point / KEY_FILE_NAME
-    tmp_path = mount_point / f"{KEY_FILE_NAME}.tmp"
+    tmp_path = mount_point / KEY_TMP_FILE_NAME
 
     try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, ensure_ascii=False)
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
-
-        tmp_path.replace(key_path)
-        os.sync()
-        return key_path
-    except PermissionError as e:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except Exception:
-                pass
-        raise PermissionError(
-            f"Cannot write key to floppy disk: {e}.\n"
-            "Please check if the physical write-protect tab on the back of the 3.5\" floppy disk is open (locked) "
-            "or if the disk is mounted read-only."
-        ) from e
-    except Exception as e:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except Exception:
-                pass
+        f = open(tmp_path, "w", encoding="utf-8")
+    except OSError as e:
+        if e.errno in _WRITE_PROTECT_ERRNOS:
+            raise WriteProtectedError(
+                f"Cannot write key to floppy disk: {e}. "
+                "Check whether the write-protect tab on the 3.5\" disk is open "
+                "or the disk is mounted read-only."
+            ) from e
         raise
 
+    with f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
 
-VOLUME_ANCHOR_FILE = ".floppy-uuid"
+    tmp_path.replace(key_path)
+    os.sync()
+    return key_path
 
 
-def get_disk_volume_id(device: FloppyDevice, mount_point: Path, create_if_missing: bool = False) -> str:
-    """Retrieve or initialize a persistent volume identifier for the floppy media.
-
-    Combines the filesystem UUID (if present via udev) with a persistent on-disk anchor.
-    """
-    udev_uuid = ""
+def _overwrite_and_unlink(path: Path) -> bool:
+    """Overwrite file contents in place (no truncation), sync, then delete."""
+    if not path.is_file():
+        return False
     try:
-        res = subprocess.run(
-            ["udevadm", "info", "-q", "property", "-p", str(device.sysfs_path)],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        for line in res.stdout.splitlines():
-            if line.startswith("ID_FS_UUID="):
-                udev_uuid = line.split("=", 1)[1].strip()
-                break
-    except Exception:
-        pass
-
-    anchor_path = mount_point / VOLUME_ANCHOR_FILE
-    disk_anchor = ""
-    if anchor_path.is_file():
-        try:
-            disk_anchor = anchor_path.read_text(encoding="utf-8").strip()
-        except Exception:
-            pass
-
-    if not disk_anchor and create_if_missing:
-        import uuid
-        disk_anchor = str(uuid.uuid4())
-        try:
-            anchor_path.write_text(disk_anchor + "\n", encoding="utf-8")
-            os.sync()
-        except Exception as e:
-            logger.debug("Failed writing volume anchor: %s", e)
-
-    if udev_uuid and disk_anchor:
-        return f"{udev_uuid}-{disk_anchor}"
-    elif udev_uuid:
-        return udev_uuid
-    elif disk_anchor:
-        return disk_anchor
-    else:
-        return "unidentified-volume"
+        size = path.stat().st_size
+        if size > 0:
+            # r+b keeps the existing cluster allocation on FAT, unlike "wb"
+            # which truncates first and may write the noise elsewhere.
+            with open(path, "r+b") as f:
+                f.write(os.urandom(size))
+                f.flush()
+                os.fsync(f.fileno())
+        path.unlink()
+        os.sync()
+        return True
+    except Exception as e:
+        logger.warning("Failed to wipe %s: %s", path, e)
+        return False
 
 
 def wipe_key_file(mount_point: Path) -> bool:
-    """Wipe and remove .floppy-key and .floppy-uuid from the floppy disk."""
-    key_path = mount_point / KEY_FILE_NAME
+    """Overwrite and remove key files (and the legacy volume anchor) from the disk."""
     wiped = False
-    if key_path.is_file():
-        try:
-            sz = key_path.stat().st_size
-            if sz > 0:
-                with open(key_path, "wb") as f:
-                    f.write(os.urandom(sz))
-                os.sync()
-            key_path.unlink()
-            os.sync()
+    for name in (KEY_FILE_NAME, KEY_TMP_FILE_NAME):
+        if _overwrite_and_unlink(mount_point / name):
             wiped = True
-        except Exception as e:
-            logger.warning("Failed to wipe key file: %s", e)
 
-    anchor_path = mount_point / VOLUME_ANCHOR_FILE
+    anchor_path = mount_point / LEGACY_VOLUME_ANCHOR_FILE
     if anchor_path.is_file():
         try:
             anchor_path.unlink()

@@ -17,6 +17,7 @@ mkdir -p "${BIN_DIR}" "${INSTALL_DIR}" "${SYSTEMD_USER_DIR}"
 echo "[*] Installing FloppyKey files to ${INSTALL_DIR}..."
 rm -rf "${INSTALL_DIR}/floppy_key"
 cp -r "${SCRIPT_DIR}/floppy_key" "${INSTALL_DIR}/"
+find "${INSTALL_DIR}/floppy_key" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 cp "${SCRIPT_DIR}/floppy-key" "${INSTALL_DIR}/"
 chmod +x "${INSTALL_DIR}/floppy-key"
 
@@ -40,6 +41,11 @@ echo " [OK] Installation complete!"
 echo "      CLI: ${BIN_DIR}/floppy-key"
 echo "      Service: systemctl --user status floppy-key.service"
 echo ""
+if [[ ":$PATH:" != *":${BIN_DIR}:"* ]]; then
+    echo " [!] Note: ${BIN_DIR} is not in your current PATH."
+    echo "     Add it to ~/.bashrc or ~/.profile: export PATH=\"${BIN_DIR}:\$PATH\""
+    echo ""
+fi
 echo " Quick Start:"
 echo "   floppy-key status      # Check drive and media status"
 echo "   floppy-key pair        # Pair your 3.5\" floppy disk"

@@ -1,35 +1,22 @@
-"""Process and memory security hardening for FloppyKey.
+"""Desktop notifications for FloppyKey.
 
-Provides:
-- Core dump and ptrace disabling via Linux prctl(PR_SET_DUMPABLE, 0)
-- Desktop security alert notifications via notify-send
-- Sensitive memory wiping
+Threat model note: FloppyKey only defends against a physical attacker sitting
+at the lock screen without the paired floppy. Any process already running as
+the user can call `loginctl unlock-session` directly, so in-process memory
+hardening (prctl, buffer zeroing) is intentionally not attempted.
 """
 
-import ctypes
 import logging
 import subprocess
 
 logger = logging.getLogger("floppy_key.security")
 
 
-def disable_coredump() -> bool:
-    """Disable core dumping and unprivileged ptrace inspection via prctl."""
-    try:
-        libc = ctypes.CDLL(None)
-        PR_SET_DUMPABLE = 4
-        res = libc.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0)
-        return res == 0
-    except Exception as e:
-        logger.debug("Failed to set PR_SET_DUMPABLE: %s", e)
-        return False
-
-
-def send_security_alert(title: str, message: str) -> bool:
-    """Send a critical desktop security notification to the user."""
+def notify(title: str, message: str, urgency: str = "normal") -> bool:
+    """Send a desktop notification via notify-send."""
     try:
         subprocess.run(
-            ["notify-send", "-u", "critical", "-a", "FloppyKey", title, message],
+            ["notify-send", "-u", urgency, "-a", "FloppyKey", title, message],
             capture_output=True,
             text=True,
             timeout=3,
@@ -40,8 +27,6 @@ def send_security_alert(title: str, message: str) -> bool:
         return False
 
 
-def zero_memory(buf: bytearray) -> None:
-    """Explicitly zero out mutable memory buffers containing sensitive material."""
-    if isinstance(buf, bytearray):
-        for i in range(len(buf)):
-            buf[i] = 0
+def send_security_alert(title: str, message: str) -> bool:
+    """Send a critical desktop security notification to the user."""
+    return notify(title, message, urgency="critical")
