@@ -115,9 +115,26 @@ def cmd_daemon(args) -> int:
     """Run the background media monitoring and auto-unlock loop."""
     security.disable_coredump()
     lock_handle = acquire_daemon_lock()
+    service_taken_over = False
+
     if not lock_handle:
-        logger.error("Another floppy-key daemon instance is already running (e.g. floppy-key.service).")
-        return 1
+        if getattr(args, "takeover", False):
+            logger.info("Stopping floppy-key.service to run in foreground test mode...")
+            subprocess.run(["systemctl", "--user", "stop", "floppy-key.service"], check=False)
+            time.sleep(0.5)
+            lock_handle = acquire_daemon_lock()
+            if not lock_handle:
+                logger.error("Could not acquire daemon lock even after stopping floppy-key.service.")
+                return 1
+            service_taken_over = True
+        else:
+            logger.error(
+                "Another daemon instance is already running (e.g. floppy-key.service).\n"
+                "  * View live background logs : journalctl --user -u floppy-key.service -f\n"
+                "  * Run foreground test mode  : floppy-key daemon --takeover\n"
+                "  * Or stop service manually  : systemctl --user stop floppy-key.service"
+            )
+            return 1
 
     interval = max(0.5, args.interval)
     logger.info("FloppyKey daemon started (poll interval: %.1fs)", interval)
@@ -212,10 +229,14 @@ def cmd_daemon(args) -> int:
         logger.info("Daemon received interrupt signal, shutting down.")
         return 0
     finally:
-        try:
-            lock_handle.close()
-        except Exception:
-            pass
+        if lock_handle:
+            try:
+                lock_handle.close()
+            except Exception:
+                pass
+        if service_taken_over:
+            logger.info("Restoring background floppy-key.service...")
+            subprocess.run(["systemctl", "--user", "start", "floppy-key.service"], check=False)
 
 
 def cmd_status(args) -> int:
@@ -379,6 +400,9 @@ def main():
     p_daemon = subparsers.add_parser("daemon", help="Run the background unlock daemon")
     p_daemon.add_argument(
         "-i", "--interval", type=float, default=1.0, help="Polling interval in seconds (default: 1.0)"
+    )
+    p_daemon.add_argument(
+        "-t", "--takeover", action="store_true", help="Temporarily stop background service and run in foreground, auto-restarting on exit"
     )
     p_daemon.set_defaults(func=cmd_daemon)
 
